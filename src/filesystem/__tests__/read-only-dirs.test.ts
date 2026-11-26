@@ -34,6 +34,7 @@ const WRITE_TOOLS = [
   "append_file",
   "copy_file",
   "create_directory",
+  "delete_path",
   "edit_file",
   "move_file",
   "write_file",
@@ -146,6 +147,15 @@ describe.each([
     });
     await expectRefused(client, "create_directory", { path: protectedDir });
     await expect(fs.access(path.join(protectedDir, "sub"))).rejects.toThrow();
+  });
+
+  it("refuses delete_path in the read-only directory", async () => {
+    const client = await connect(mode);
+    await expectRefused(client, "delete_path", {
+      path: keep(),
+      recursive: true,
+    });
+    expect(await keepContent()).toBe("original\n");
   });
 
   it("refuses move_file out of and into the read-only directory", async () => {

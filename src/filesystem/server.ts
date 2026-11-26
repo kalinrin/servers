@@ -6,6 +6,7 @@
 // a module global lets two instances coexist in one process.
 import { McpServer } from "@modelcontextprotocol/server";
 import type { Root } from "@modelcontextprotocol/server";
+import fs from "fs/promises";
 import path from "path";
 import { pathToFileURL } from "url";
 import { z } from "zod";
@@ -133,6 +134,17 @@ const CreateDirectoryArgsSchema = z.object({
   path: pathArg(
     "The directory to create, with any missing parents; an existing directory is left as is",
   ),
+});
+
+const DeletePathArgsSchema = z.object({
+  path: pathArg("The file or directory to delete permanently"),
+  recursive: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      "Must be true to delete a non-empty directory and all of its contents",
+    ),
 });
 
 const ListDirectoryArgsSchema = z.object({
@@ -687,6 +699,71 @@ export function createServer(
       );
       await createDirectory(validPath);
       const text = `Successfully created directory ${args.path}`;
+      return {
+        content: [{ type: "text" as const, text }],
+        structuredContent: { content: text },
+      };
+    },
+  );
+
+  server.registerTool(
+    "delete_path",
+    {
+      title: "Delete File or Directory",
+      description:
+        "Permanently delete a regular file or directory. " +
+        "By default, only files and empty directories can be deleted. " +
+        "Set recursive to true to delete a non-empty directory and all its contents. " +
+        "This does not move anything to the recycle bin. " +
+        "Allowed root directories themselves cannot be deleted. " +
+        "Only works within allowed directories.",
+      inputSchema: jsonSchema2020(DeletePathArgsSchema.shape),
+      outputSchema: jsonSchema2020({ content: z.string() }),
+      annotations: {
+        readOnlyHint: false,
+        idempotentHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args: z.infer<typeof DeletePathArgsSchema>) => {
+      const validPath = await validatePath(
+        args.path,
+        allowedDirectories,
+        "write",
+        readOnlyDirectories,
+      );
+
+      // Do not let one call remove an entire allowed root. Callers can still
+      // delete its children, or remove a child directory recursively.
+      const normalizedTarget = path.resolve(validPath);
+      const isAllowedRoot = allowedDirectories.some(
+        (directory) => path.resolve(directory) === normalizedTarget,
+      );
+      if (isAllowedRoot) {
+        throw new Error(
+          `Refusing to delete an allowed root directory: ${validPath}`,
+        );
+      }
+
+      const stats = await fs.lstat(validPath);
+      if (stats.isDirectory()) {
+        if (args.recursive) {
+          await fs.rm(validPath, { recursive: true, force: false });
+        } else {
+          // rmdir fails when the directory is not empty, making recursive
+          // deletion an explicit opt-in rather than a surprising default.
+          await fs.rmdir(validPath);
+        }
+      } else if (stats.isFile()) {
+        await fs.unlink(validPath);
+      } else {
+        throw new Error(
+          `Refusing to delete: not a regular file or directory: ${validPath}`,
+        );
+      }
+
+      const text = `Successfully deleted ${args.path}`;
       return {
         content: [{ type: "text" as const, text }],
         structuredContent: { content: text },
