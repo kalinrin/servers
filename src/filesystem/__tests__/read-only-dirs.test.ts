@@ -158,6 +158,38 @@ describe.each([
     expect(await keepContent()).toBe("original\n");
   });
 
+  it("refuses delete_path when the workspace trash is read-only", async () => {
+    const trash = path.join(writable, ".mcp-trash");
+    await fs.mkdir(trash);
+    const client = await connect(mode, [writable], [trash]);
+
+    const result = await call(client, "delete_path", {
+      path: path.join(writable, "scratch.txt"),
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Access denied - read-only directory");
+    expect(textOf(result)).toContain(`is in ${trash}`);
+    expect(await fs.readFile(path.join(writable, "scratch.txt"), "utf8")).toBe(
+      "scratch\n",
+    );
+  });
+
+  it("refuses delete_path for a directory containing a read-only one", async () => {
+    const vault = path.join(writable, "bundle", "vault");
+    await fs.mkdir(vault, { recursive: true });
+    const client = await connect(mode, [writable], [vault]);
+
+    const result = await call(client, "delete_path", {
+      path: path.join(writable, "bundle"),
+      recursive: true,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(`contains ${vault}`);
+    await expect(fs.stat(vault)).resolves.toBeDefined();
+  });
+
   it("refuses move_file out of and into the read-only directory", async () => {
     const client = await connect(mode);
     await expectRefused(client, "move_file", {

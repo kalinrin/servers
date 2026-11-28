@@ -24,6 +24,7 @@ import {
   appendFileContent,
   createDirectory,
   moveFile,
+  moveToTrash,
   copyFile,
   searchFilesWithValidation,
   isExcludedPath,
@@ -34,6 +35,7 @@ import {
   createEntryBudget,
 } from "./lib.js";
 import { registerFileResources } from "./file-resources.js";
+import { isPathWithinAllowedDirectories } from "./path-validation.js";
 import { describeReadOnlyDirectories } from "./read-only-directories.js";
 import { SERVER_VERSION } from "./version.js";
 
@@ -137,13 +139,20 @@ const CreateDirectoryArgsSchema = z.object({
 });
 
 const DeletePathArgsSchema = z.object({
-  path: pathArg("The file or directory to delete permanently"),
+  path: pathArg("The file or directory to move to trash or delete"),
   recursive: z
     .boolean()
     .optional()
     .default(false)
     .describe(
-      "Must be true to delete a non-empty directory and all of its contents",
+      "Must be true to move or permanently delete a non-empty directory and all of its contents",
+    ),
+  permanent: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      "Permanently delete instead of moving to .mcp-trash in the containing allowed directory",
     ),
 });
 
@@ -711,10 +720,11 @@ export function createServer(
     {
       title: "Delete File or Directory",
       description:
-        "Permanently delete a regular file or directory. " +
-        "By default, only files and empty directories can be deleted. " +
-        "Set recursive to true to delete a non-empty directory and all its contents. " +
-        "This does not move anything to the recycle bin. " +
+        "Move a regular file or directory to .mcp-trash in its containing allowed directory. " +
+        "The path relative to that directory is preserved, and existing trash entries are never overwritten. " +
+        "Set permanent to true to delete permanently instead. " +
+        "By default, only files and empty directories are accepted. " +
+        "Set recursive to true for a non-empty directory and all its contents. " +
         "Allowed root directories themselves cannot be deleted. " +
         "Only works within allowed directories.",
       inputSchema: jsonSchema2020(DeletePathArgsSchema.shape),
@@ -730,7 +740,7 @@ export function createServer(
       const validPath = await validatePath(
         args.path,
         allowedDirectories,
-        "write",
+        "move",
         readOnlyDirectories,
       );
 
@@ -747,23 +757,83 @@ export function createServer(
       }
 
       const stats = await fs.lstat(validPath);
-      if (stats.isDirectory()) {
-        if (args.recursive) {
-          await fs.rm(validPath, { recursive: true, force: false });
-        } else {
-          // rmdir fails when the directory is not empty, making recursive
-          // deletion an explicit opt-in rather than a surprising default.
-          await fs.rmdir(validPath);
-        }
-      } else if (stats.isFile()) {
-        await fs.unlink(validPath);
-      } else {
+      if (!stats.isDirectory() && !stats.isFile()) {
         throw new Error(
           `Refusing to delete: not a regular file or directory: ${validPath}`,
         );
       }
+      if (stats.isDirectory() && !args.recursive) {
+        // Keep recursive opt-in for trash moves too: moving a non-empty
+        // directory moves everything below it, just as recursive deletion
+        // would remove everything below it.
+        if ((await listValidatedDirectory(validPath, false)).length > 0) {
+          throw new Error(
+            `Directory is not empty: ${validPath}. Set recursive to true to move or permanently delete it and all of its contents`,
+          );
+        }
+      }
 
-      const text = `Successfully deleted ${args.path}`;
+      if (args.permanent) {
+        if (stats.isDirectory()) {
+          if (args.recursive) {
+            await fs.rm(validPath, { recursive: true, force: false });
+          } else {
+            await fs.rmdir(validPath);
+          }
+        } else {
+          await fs.unlink(validPath);
+        }
+        const text = `Successfully permanently deleted ${args.path}`;
+        return {
+          content: [{ type: "text" as const, text }],
+          structuredContent: { content: text },
+        };
+      }
+
+      // The containing allowed directory is the workspace. With nested
+      // allowed directories, the longest match is the most specific one.
+      const workspace = [...allowedDirectories]
+        .sort(
+          (left, right) =>
+            path.resolve(right).length - path.resolve(left).length,
+        )
+        .find((directory) =>
+          isPathWithinAllowedDirectories(validPath, [directory]),
+        );
+      /* v8 ignore next -- validatePath has already established containment */
+      if (!workspace) {
+        throw new Error(
+          `Could not determine the workspace containing: ${validPath}`,
+        );
+      }
+
+      const trashRoot = path.join(workspace, ".mcp-trash");
+      if (isPathWithinAllowedDirectories(validPath, [trashRoot])) {
+        throw new Error(
+          `Refusing to move the trash directory or its contents into trash: ${validPath}. Set permanent to true to delete permanently`,
+        );
+      }
+
+      const destination = path.join(
+        trashRoot,
+        path.relative(workspace, validPath),
+      );
+      // Validate the parent, not the leaf: an existing leaf may be a symlink,
+      // and resolving it would send a collision-suffixed entry outside trash.
+      // moveToTrash uses lstat on the leaf and never follows or overwrites it.
+      const validTrashDirectory = await validatePath(
+        path.dirname(destination),
+        allowedDirectories,
+        "move",
+        readOnlyDirectories,
+      );
+      await createDirectory(validTrashDirectory);
+      const validDestination = path.join(
+        validTrashDirectory,
+        path.basename(destination),
+      );
+      const trashPath = await moveToTrash(validPath, validDestination);
+      const text = `Successfully moved ${args.path} to ${trashPath}`;
       return {
         content: [{ type: "text" as const, text }],
         structuredContent: { content: text },

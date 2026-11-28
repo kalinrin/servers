@@ -7,8 +7,9 @@ Published on npm as [`@modelcontextprotocol/server-filesystem`](https://www.npmj
 ## Features
 
 - Read/write files
-- Create/list/delete directories
-- Move files/directories
+- Create/list directories
+- Move/rename files/directories
+- Move files/directories to a workspace-local trash, or delete them permanently
 - Search files
 - Get file metadata
 - Directory access control from command-line arguments, with [Roots](https://modelcontextprotocol.io/docs/learn/client-concepts#roots) as a deprecated, 2025-era convenience
@@ -236,13 +237,17 @@ Files inside the allowed directories are also [resources](https://modelcontextpr
   - Succeeds silently if directory exists
 
 - **delete_path**
-  - Permanently delete a regular file or directory; nothing is moved to the recycle bin
+  - Move a regular file or directory to `.mcp-trash` in its containing allowed directory by default
   - Inputs:
-    - `path` (string): The file or directory to delete
-    - `recursive` (boolean, optional): Must be `true` to delete a non-empty directory and all its contents; defaults to `false`
-  - By default, deletes files and empty directories only
-  - Refuses to delete an allowed root directory itself
-  - Uses the same allowed-directory and read-only-directory checks as the other write tools
+    - `path` (string): The file or directory to move or delete
+    - `recursive` (boolean, optional): Must be `true` for a non-empty directory and all its contents; defaults to `false`
+    - `permanent` (boolean, optional): Permanently delete instead of moving to trash; defaults to `false`
+  - The trash entry keeps the target's path relative to its workspace: deleting `<workspace>/src/a.txt` moves it to `<workspace>/.mcp-trash/src/a.txt`
+  - With multiple or nested allowed directories, the most specific directory containing the target is its workspace
+  - Existing trash entries are never overwritten: a collision produces a uniquely suffixed name, and the result reports the actual trash path
+  - By default, accepts files and empty directories only; `recursive: true` is required for a non-empty directory in either mode
+  - Refuses to delete an allowed root directory itself. The trash directory and entries already inside it cannot be moved into trash again; use `permanent: true` to delete them
+  - Uses the same allowed-directory and read-only-directory checks as the other write tools, for both the source and the trash destination
 
 - **list_directory**
   - List the entries directly inside a directory, one per line, with [FILE] or [DIR] prefixes
@@ -404,7 +409,7 @@ The mapping for filesystem tools is:
 | `get_file_info`             | `true`       | `true`         | `false`         | Pure read                                          |
 | `list_allowed_directories`  | `true`       | `true`         | `false`         | Pure read                                          |
 | `create_directory`          | `false`      | `true`         | `false`         | Re‑creating the same dir is a no‑op                |
-| `delete_path`               | `false`      | `false`        | `true`          | Permanently deletes a file or directory            |
+| `delete_path`               | `false`      | `false`        | `true`          | Moves to workspace trash, or permanently deletes   |
 | `write_file`                | `false`      | `true`         | `true`          | Overwrites existing files                          |
 | `append_file`               | `false`      | `false`        | `false`         | Adds to a file; repeating it appends again         |
 | `edit_file`                 | `false`      | `false`        | `true`          | Re‑applying edits can fail or double‑apply         |

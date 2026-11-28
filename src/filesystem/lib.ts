@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import type { Dirent } from "fs";
+import { randomUUID } from "crypto";
 import path from "path";
 import { StringDecoder } from "string_decoder";
 import { createTwoFilesPatch } from "diff";
@@ -770,6 +771,29 @@ export async function moveFile(
     throw error;
   }
   throw new Error(`Destination already exists: ${destinationPath}`);
+}
+
+/**
+ * Move an already validated entry to an already validated trash destination.
+ * The first destination keeps the entry's original relative path. If that
+ * name is already occupied, a unique suffix preserves both entries instead of
+ * overwriting the older one. moveFile still refuses a destination that appears
+ * after this check, so a concurrent move cannot overwrite anything either.
+ */
+export async function moveToTrash(
+  sourcePath: string,
+  destinationPath: string,
+): Promise<string> {
+  let trashPath = destinationPath;
+  if (await entryExists(trashPath)) {
+    const parsed = path.parse(destinationPath);
+    trashPath = path.join(
+      parsed.dir,
+      `${parsed.name}-${Date.now()}-${randomUUID()}${parsed.ext}`,
+    );
+  }
+  await moveFile(sourcePath, trashPath);
+  return trashPath;
 }
 
 /**
